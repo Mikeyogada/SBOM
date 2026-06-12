@@ -1,0 +1,177 @@
+name: SBOM build siging and attestation workflow
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
+
+permissions: 
+    contents: read #allows workflow to read repository-projects
+    packages: write #allows workflow to publish packages to Github Packages, which is necessary for publishing the signed SBOM and attestation to GHCR
+    id-token: write #allows workflow to request OIDC tokens for authentication with cloud providers or other services
+    attestations: write #allows workflow to create attestations in the repository
+
+
+env:
+    IMAGE_NAME: ghcr.io/mikeyogada/sbom-image:latest #name of the image that will be built, signed, attested, and published to GHCR, this should be in the format of "ghcr.io/OWNER/REPOSITORY:TAG" where OWNER is your GitHub username or organization name, REPOSITORY is the name of your repository, and TAG is the tag you want to use for the image (e.g., latest)
+    #recommend using digest instead of tag for better security, but for testing purposes we can use latest as the tag, just make sure to update it to a specific tag or digest in a production environment to ensure that you are using the correct version of the image and to prevent issues with caching or pulling the wrong image from GHCR
+
+
+jobs:
+  build: #build job is responsible for building the SBOM file
+    runs-on: ubuntu-latest
+
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }} #output variable that will store the digest of the built image, this allows us to reference the digest in later jobs for signing, attestation, and verification purposes to ensure that we are using the correct version of the image throughout the workflow
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR #github container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+    
+      - name: Build Image
+        run: |
+            docker build -t $IMAGE_NAME . #build docker image using the dockerfile in the root of the repo and tag it with the name specified in the IMAGE_NAME environment variable
+
+      - name: Push image
+        id: digest
+        run: |
+            docker push $IMAGE_NAME #push the built image to the GitHub Container Registry (GHCR) using the tag specified in the IMAGE_NAME environment variable
+
+            DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' $IMAGE_NAME) #get the digest of the pushed image, this is important for ensuring that we are using the correct version of the image in later steps and for verifying the integrity of the image when we pull it from GHCR later on
+            
+            echo "digest=$DIGEST" >> $GITHUB_OUTPUT #Set the digest as an output variable that can be referenced in later jobs, this allows us to ensure that we are using the correct version of the image throughout the workflow and for verification purposes when we pull the image from GHCR later on
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0 #install syft, a tool for generating SBOMs, using the GitHub Action provided by Anchore
+
+      - name: Generate SBOM #generate SBOM file using syft, the output is in cyclonedx format and is saved as sbom-image.json
+        run: |
+            syft ${{ steps.digest.outputs.digest }} -o cyclonedx-json=sbom-image.json
+    
+      - name: Upload SBOM artifact #upload the generated SBOM file as an artifact of the workflow, this allows it to be accessed in later steps or jobs in the workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-image #name of the artifact can be used to reference it in later steps or jobs
+          path: sbom-image.json #path to the file that is being uploaded as an artifact, in this case it is the generated SBOM file
+
+
+  # Job 2 - Sign the SBOM
+
+  sign:
+        needs: build #this job depends on the successful completion of the build job, it will only run if the build job completes successfully
+        runs-on: ubuntu-latest
+        steps:
+            - name: download SBOM artifact #download the SBOM file that was generated in the build job, this allows us to access the SBOM file and sign it in this job
+              uses: actions/download-artifact@v4
+              with:
+                name: sbom-image #name of the artifact to download, this should match the name used when uploading the artifact in the build job
+
+            - name: Install Cosign #install cosign, a tool for signing and verifying container images and other artifacts, using the GitHub Action provided by Sigstore
+              uses: sigstore/cosign-installer@v3
+
+            - name: Sign SBOM file
+              run: |
+                cosign sign-blob --yes --output-signature sbom.json.sig --output-certificate sbom-image.json.pem  sbom-image.json
+              #keyless signing - used to sign the SBOM file without using a key, this is useful for testing purposes but in a production environment you would want to use a key to ensure that only trusted identities can sign the SBOM file and create signatures for it
+              #cosign obtains certificates from the OIDC provider (GitHub Actions in this case) and uses them to sign the SBOM file, this allows for a more secure and flexible way to sign the SBOM file without the need to manage keys and certificates directly in the workflow, it also allows for better integration with GitHub Actions and other services that support OIDC authentication, making it easier to implement secure signing practices in
+              #your CI/CD pipelines and other workflows that involve signing artifacts like SBOM files, this is a recommended approach for signing SBOM files in a production environment to ensure the integrity and authenticity of the SBOM files while minimizing the risks associated with key management and exposure
+              #sign-blob - used to sign arbitrary files, in this case we are signing the SBOM file (sbom-image.json) using the OIDC provider for authentication and generating a signature file (sbom.json.sig) and a certificate file (sbom-image.json.pem)
+              #output-signature - this is used to store the actual digital signature that is generated by signing the SBOM file, it can be used for verifying the integrity and authenticity of the SBOM file later
+              #output-certificate - this is used to store the certificate that can be used for verifying the signature later, it contains the public key and other metadata about the signature, it can be used to verify the signature and ensure that it was created by a trusted identity, it is important
+              #to keep the certificate file secure and to use it for verification purposes to ensure the integrity and authenticity of the SBOM file when it is used in deployment or other processes later on
+
+            - name: Upload Signature Files as Artifacts #upload the signature and certificate files as artifacts of the workflow, this allows us to access these files in later steps or jobs in the workflow for verification purposes
+              uses: actions/upload-artifact@v4
+              with:
+                name: sbom-signature #name of the artifact can be used to reference it in later steps or jobs
+                path: |
+                  sbom.json.sig #path to the signature file that is being uploaded as an artifact
+                  sbom-image.json.pem #path to the certificate file that is being uploaded as an artifact, this contains the public key and metadata for verifying the signature later on
+
+
+  #job 3 - Attestation binding
+  attest:
+    needs: [build,sign] #job depends on the successful completion of the sign job, it will only run if the sign job completes successfully
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: download SBOM artifact #download the SBOM file that was generated in the build job, this allows us to access the SBOM file and create an attestation for it in this job
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom-image #name of the artifact to download, this should match the name used when uploading the artifact in the build job
+
+      - name: Install Cosign #install cosign, a tool for signing and verifying container images and other artifacts, using the GitHub Action provided by Sigstore
+        uses: sigstore/cosign-installer@v3
+
+      - name: Create Attestation
+        run: |
+          cosign attest --yes --predicate sbom-image.json --type cyclonedx "${{ needs.build.outputs.digest }}" #create an attestation for the image using the SBOM file as the predicate, this allows us to bind the SBOM file to the image and create a verifiable attestation that can be used to ensure the integrity and authenticity of the image when it is used in deployment or other processes later on
+
+          #keyless attestation - used to create an attestation without using a key, this is useful for testing purposes but in a production environment you would want to use a key to ensure that only trusted identities can create attestations for the image
+          #cosign obtains certificates from the OIDC provider (GitHub Actions in this case) and uses them to create the attestation, this allows for a more secure and flexible way to create attestations without the need to manage keys and certificates directly in the workflow
+
+
+# job 4 - Pull sbom and attestation 
+  pull:
+        needs: [build,attest] #job depends on the successful completion of the attest job, it will only run if the attest job completes successfully
+        runs-on: ubuntu-latest
+
+        steps:
+
+            - name: Login to GHCR #github container registry
+              uses: docker/login-action@v3
+              with:
+                registry: ghcr.io
+                username: ${{ github.actor }}
+                password: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Pull image
+              run: |
+                    docker pull "${{ needs.build.outputs.digest }}" #pull the image from GHCR using the digest specified in the IMAGE_DIGEST environment variable, this will also pull the associated SBOM and attestation that were published in the previous job, allowing us to verify the integrity and authenticity of the image when we pull it from GHCR
+
+# Job 6 - verify
+  verify:
+            needs: [build,Pull] #job depends on the successful completion of the Pull job, it will only run if the Pull job completes successfully
+            runs-on: ubuntu-latest
+    
+            steps:
+                - name: Install Cosign #install cosign, a tool for signing and verifying container images and other artifacts, using the GitHub Action provided by Sigstore
+                  uses: sigstore/cosign-installer@v3
+                
+                - name: Download SBOM artifact #download the SBOM file that was generated in the build job, this allows us to access the SBOM file and use it for verification purposes in this job
+                  uses: actions/download-artifact@v4
+                  with:
+                    name: sbom-image #name of the artifact to download, this should match the name used when uploading the artifact in the build job
+
+                - name: Download signature files #download the signature and certificate files that were generated in the sign job, this allows us to access these files and use them for creating the attestation in this job
+                  uses: actions/download-artifact@v4
+                  with:
+                    name: sbom-signature #name of the artifact to download, this should match the name used when uploading the artifact in the sign job
+    
+                - name: Verify SBOM and Attestation
+                  run: |
+                    cosign verify-blob --signature sbom.json.sig --certificate sbom-image.json.pem --certificate-oidc-issuer "https://token.actions.githubusercontent.com" sbom-image.json
+                    #cosign used to verify the sbom file using the signature and certificate generated in the previous jobs, this allows us to ensure that the SBOM file has not been tampered with and that it was signed by a trusted identity, this is an important step to ensure the integrity and authenticity of the SBOM file before we use it in deployment or other processes later on
+
+
+                    cosign verify-attestation --type cyclonedx --certificate-oidc-issuer "https://token.actions.githubusercontent.com" --certificate-identity-regexp "https://github.com/.+" "${{ needs.build.outputs.digest }}"
+                    #cosign used to verify the attestation for the image, this allows us to ensure that the attestation for the image is valid and was created by a trusted identity, this is an important step to ensure the integrity and authenticity of the image before we use it in deployment or other processes
+
+                    #verify - used to verify signature and attestation of a given artifact
+                    #--certificate-oidc-issuer - this option is used to specify the expected OIDC issuer for the certificate, in this case it is set to "https://token.actions.githubusercontent.com" which is the OIDC issuer for GitHub Actions
+                    #--certificate-identity-regexp - this option is used to specify a regular expression that matches the expected identity of the signer, in this case it is set to ".*" which means it will match any identity, this is useful for testing purposes but in a production environment you would want to set this to a more specific value to ensure that only trusted identities can sign the SBOM and create attestations for the image
+                    #$DIGEST - this is the digest of the image that we are verifying, it should match the digest of the image that was signed and attested in the previous jobs, this allows us to ensure that the image we pulled from GHCR has a valid signature and attestation, which confirms its integrity and authenticity before we use it in our deployment or other processes
+
+                - name: Deployment gate confirmation message
+                  run: |
+                    echo "SBOM and Attestation for image ${{ needs.build.outputs.digest }} have been verified successfully." #print a confirmation message to the console indicating that the SBOM and attestation for the image have been verified successfully, this allows users to know that the image is trusted and can be safely deployed or used in other processes
+    

@@ -1,0 +1,19 @@
+name: Attestation binding gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions: 
+    contents: read
+    id-token: write
+    attestations: write
+
+jobs:
+  attestation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+

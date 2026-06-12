@@ -1,0 +1,44 @@
+name: SBOM visibility validation # Github action workflow for validating the visibility of SBOM files in a repository
+
+on: 
+  push:
+    branches:
+      - main
+
+jobs:
+  validate-sbom:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code #checkout source code from the repository to the runner environment
+        uses: actions/checkout@v3
+    
+      - name: Set up JQ
+        run: |
+         sudo apt-get update 
+         sudo apt-get install -y jq # Install JQ, a command-line tool for processing JSON files
+
+      - name: Install syft
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin # Install Syft, a tool for generating SBOM files from container images
+
+
+      - name: Build docker image #build docker image from the source code in the repository, this image will be used to generate the SBOM file
+        run: |
+          docker build -t sbom-lab:1.0 . # Build a Docker image from the current directory # The Dockerfile should be present in the repository and should define how to build the image
+
+      
+      - name: Generate SBOM file
+        run: |
+          syft sbom-lab:1.0 -o cyclonedx-json=sbom-image.json # Generate an SBOM file in JSON format from the Docker image and save it as sbom-source.json
+          
+      - name: Validate SBOM file
+        run: |
+          chmod +x validate-sbom.sh # Make the validation script executable
+          ./validate-sbom.sh # Run the validation script
+
+      - name: Upload SBOM file as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-image #name of the artifact, this will be used to identify the artifact when downloading it later
+          path: sbom-image.json # Upload the generated SBOM file as an artifact of the workflow, this allows you to download and inspect the SBOM file after the workflow runs
