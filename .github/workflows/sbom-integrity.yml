@@ -1,0 +1,223 @@
+name: SBOM Integrity Signing and Attestation
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+
+################################################################################
+# JOB 1
+# Build image, push to GHCR, generate SBOM
+################################################################################
+
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      ##########################################################################
+      # Install Syft
+      ##########################################################################
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      ##########################################################################
+      # Login to GHCR
+      ##########################################################################
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      ##########################################################################
+      # Build image
+      ##########################################################################
+
+      - name: Build image
+        run: |
+          docker build \
+            -t $REGISTRY/$IMAGE_NAME:${{ github.sha }} \
+            -t $REGISTRY/$IMAGE_NAME:latest \
+            .
+
+      ##########################################################################
+      # Push image
+      ##########################################################################
+
+      - name: Push image
+        run: |
+          docker push $REGISTRY/$IMAGE_NAME:${{ github.sha }}
+          docker push $REGISTRY/$IMAGE_NAME:latest
+
+      ##########################################################################
+      # Capture immutable repository digest
+      ##########################################################################
+
+      - name: Capture repository digest
+        run: |
+
+          DIGEST=$(docker inspect \
+            $REGISTRY/$IMAGE_NAME:${{ github.sha }} \
+            --format='{{index .RepoDigests 0}}')
+
+          echo "$DIGEST"
+
+          echo "$DIGEST" > image-digest.txt
+
+      ##########################################################################
+      # Generate SBOM
+      ##########################################################################
+
+      - name: Generate SBOM
+        run: |
+          syft \
+            registry:$REGISTRY/$IMAGE_NAME:${{ github.sha }} \
+            -o cyclonedx-json=sbom.json
+
+      ##########################################################################
+      # Upload artifacts
+      ##########################################################################
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json
+
+      - name: Upload image digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-digest
+          path: image-digest.txt
+
+################################################################################
+# JOB 2
+# Sign SBOM and create attestation
+################################################################################
+
+  sign-and-attest:
+
+    needs: build
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      ##########################################################################
+      # Download artifacts
+      ##########################################################################
+
+      - name: Download SBOM
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom
+          path: .
+
+      - name: Download image digest
+        uses: actions/download-artifact@v4
+        with:
+          name: image-digest
+          path: .
+
+      ##########################################################################
+      # Install Cosign
+      ##########################################################################
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      ##########################################################################
+      # Login to GHCR
+      ##########################################################################
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      ##########################################################################
+      # Sign SBOM
+      ##########################################################################
+
+      - name: Sign SBOM
+        run: |
+
+          cosign sign-blob \
+            --yes \
+            --output-signature sbom.json.sig \
+            --output-certificate sbom.json.pem \
+            sbom.json
+
+      ##########################################################################
+      # Verify SBOM signature
+      ##########################################################################
+
+      - name: Verify SBOM signature
+        run: |
+
+          cosign verify-blob \
+            --signature sbom.json.sig \
+            --certificate sbom.json.pem \
+            sbom.json
+
+      ##########################################################################
+      # Read repository digest
+      ##########################################################################
+
+      - name: Read repository digest
+        id: digest
+        run: |
+
+          DIGEST=$(cat image-digest.txt)
+
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+
+      ##########################################################################
+      # Create SBOM attestation
+      ##########################################################################
+
+      - name: Create SBOM attestation
+        run: |
+
+          cosign attest \
+            --yes \
+            --predicate sbom.json \
+            --type cyclonedx \
+            ${{ steps.digest.outputs.digest }}
+
+      ##########################################################################
+      # Verify attestation
+      ##########################################################################
+
+      - name: Verify attestation
+        run: |
+
+          cosign verify-attestation \
+            --type cyclonedx \
+            ${{ steps.digest.outputs.digest }}

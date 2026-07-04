@@ -43,7 +43,7 @@ jobs:
               # output-certificate - this is used to store the certificate that can be used for verifying the signature later, it contains the public key and other metadata about the signature
               #difference btn output-signature and output-certificate is that the signature file contains the actual digital signature, while the certificate file contains the public key and other metadata that can be used to verify the signature
 
-            - name: verify SBOm signature
+            - name: Verify SBOM signature
               run: |
                   cosign verify-blob --certificate sbom.json.pem --signature sbom.json.sig --certificate-identity-regexp "https://github.com/Mikeyogada/SCA_labs/.github/workflows/*" --certificate-oidc-issuer "https://token.actions.githubusercontent.com" sbom-image.json
               # cosign - used for signing and verifying container iamges and other artifacts
@@ -53,6 +53,14 @@ jobs:
               # sbom-image.json - this is the original SBOM file that was signed, it is used as the input for verification to ensure that the signature matches the contents of this file
               # --certificate-identity-regexp - this option is used to specify a regular expression that matches the expected identity of the signer, in this case it is set to match any workflow in the specified repository    
 
+                #If verification fails:
+                    #1. signature invalid
+                    #2. certificated invalid
+                    #3. SBOM modified after signing
+                    #4. certificate expired
+                    # deployment should be blocked and an alert should be triggered to notify the relevant teams about the failed verification, allowing them to investigate and take appropriate action to resolve the issue before attempting to deploy again.
+          
+    
             - name: Upload SBOM and signature as artifacts #upload SBOM, signature and certificate files as artifacts of the workflow, this allows you to download and inspect these files after the workflow runs
               uses: actions/upload-artifact@v4
               with:
@@ -61,3 +69,4 @@ jobs:
                       sbom-image.json #upload the generated SBOM file as an artifact of the workflow, this allows you to download and inspect the SBOM file after the workflow runs
                       sbom.json.sig #upload the signature file as an artifact of the workflow, this allows you to download and inspect the signature file after the workflow runs
                       sbom.json.pem #upload the certificate file as an artifact of the workflow, this allows you to download and inspect the certificate file after the workflow runs
+            
