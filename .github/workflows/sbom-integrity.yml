@@ -188,7 +188,10 @@ jobs:
           cosign verify-blob \
             --signature sbom.json.sig \
             --certificate sbom.json.pem \
+            --certificate-identity "https://github.com/Mikeyogada/SBOM/.github/workflows/sbom-integrity.yml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             sbom.json
+            #this enables keyless verification of the SBOM signature using the certificate generated during signing. It checks that the certificate's identity and OIDC issuer match the expected values, ensuring that the signature is valid and was created by a trusted source.
 
       ##########################################################################
       # Read repository digest
