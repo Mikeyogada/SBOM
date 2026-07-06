@@ -66,8 +66,10 @@ jobs:
 
       - name: Build image
         run: |
-          docker build -t $REGISTRY/${{ steps.lowercase.outputs.image }}:${{ github.sha }} -t $REGISTRY/${{ steps.lowercase.outputs.image }}:latest .
-
+          docker build -t $REGISTRY/${{ steps.lowercase.outputs.image }}:${{ github.sha }} -t $REGISTRY/${{ steps.lowercase.outputs.image }}:latest . 
+          #the t flag is used to tag the image with both the commit SHA and the latest tag, allowing for versioning and easy reference to the most recent build.
+          #steps.lowercase.outputs.image is used to reference the lowercase image name generated in the previous step, ensuring consistency in naming conventions.
+          
       ##########################################################################
       # Push image
       ##########################################################################
@@ -76,6 +78,7 @@ jobs:
         run: |
           docker push $REGISTRY/${{ steps.lowercase.outputs.image }}:${{ github.sha }}
           docker push $REGISTRY/${{ steps.lowercase.outputs.image }}:latest
+          #docker push to registry with both commit SHA and latest tag, ensuring the image is available for deployment and version tracking.
 
       ##########################################################################
       # Capture immutable repository digest
@@ -91,6 +94,7 @@ jobs:
           echo "$DIGEST"
 
           echo "$DIGEST" > image-digest.txt
+          #get the immutable digest of the pushed image using docker inspect and save it to a file named image-digest.txt for later use in the signing and attestation process.
 
       ##########################################################################
       # Generate SBOM
@@ -101,6 +105,8 @@ jobs:
           syft \
             registry:$REGISTRY/${{ steps.lowercase.outputs.image }}:${{ github.sha }} \
             -o cyclonedx-json=sbom.json
+
+            #generate sbom in cyclonedx format using syft for the pushed image and save it to a file named sbom.json for later signing and attestation.
 
       ##########################################################################
       # Upload artifacts
@@ -117,6 +123,8 @@ jobs:
         with:
           name: image-digest
           path: image-digest.txt
+
+          #upload the generated SBOM and image digest as artifacts for use in the subsequent signing and attestation job into paths specified in the workflow, allowing for secure transfer and access between jobs within the same workflow run.
 
 ################################################################################
 # JOB 2
@@ -147,6 +155,8 @@ jobs:
           name: image-digest
           path: .
 
+          #download the sbom and image digest artifacts generated in the previous build job, making them available for signing and attestation in the current job.
+
       ##########################################################################
       # Install Cosign
       ##########################################################################
@@ -165,6 +175,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+          #log into the GitHub Container Registry (GHCR) using the provided credentials, enabling secure access for signing and attestation operations.
+
       ##########################################################################
       # Sign SBOM
       ##########################################################################
@@ -177,6 +189,11 @@ jobs:
             --output-signature sbom.json.sig \
             --output-certificate sbom.json.pem \
             sbom.json
+
+            #cosign sign-blob is used to sign the SBOM file (sbom.json) and generate a signature file (sbom.json.sig) and a certificate file (sbom.json.pem) for verification purposes. The --yes flag automatically confirms any prompts during the signing process.
+            #signature file (sbom.json.sig) contains the cryptographic signature of the SBOM, while the certificate file (sbom.json.pem) contains the public key and metadata needed to verify the signature.
+            #this is keyless signing, meaning it does not require a pre-existing private key, and instead uses ephemeral keys generated during the signing process.
+            
 
       ##########################################################################
       # Verify SBOM signature
@@ -203,7 +220,7 @@ jobs:
 
           DIGEST=$(cat image-digest.txt)
 
-          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT #this echo command set the image digets as variable for GITHUB_OUTPUT to be used in the next steps of the workflow, allowing for easy reference and access to the immutable digest of the pushed image.
 
       ##########################################################################
       # Create SBOM attestation
@@ -230,3 +247,8 @@ jobs:
             --certificate-identity "https://github.com/Mikeyogada/SBOM/.github/workflows/sbom-integrity.yml@refs/heads/main" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             ${{ steps.digest.outputs.digest }}
+
+#summary of the code:
+  #This GitHub Actions workflow is designed to ensure the integrity of a software bill of materials (SBOM) for a Docker image. It consists of two main jobs: "build" and "sign-and-attest".
+  #In the "build" job, the workflow checks out the repository, installs Syft (a tool for generating SBOMs), logs into GitHub Container Registry (GHCR), builds a Docker image, pushes it to GHCR, captures the image's immutable digest, generates an SBOM in CycloneDX format, and uploads the SBOM and image digest as artifacts.
+  #in the "sign-and-attest" job, the workflow downloads the SBOM and image digest artifacts, installs Cosign (a tool for signing and verifying container images), logs into GHCR, signs the SBOM, verifies the signature, reads the repository digest, creates an attestation for the SBOM, and verifies the attestation. The workflow ensures that the SBOM is securely signed and can be verified for authenticity and integrity.
