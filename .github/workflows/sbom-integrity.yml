@@ -227,4 +227,6 @@ jobs:
 
           cosign verify-attestation \
             --type cyclonedx \
+            --certificate-identity "https://github.com/Mikeyogada/SBOM/.github/workflows/sbom-integrity.yml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             ${{ steps.digest.outputs.digest }}
