@@ -40,6 +40,13 @@ jobs:
       - name: Install Syft
         uses: anchore/sbom-action/download-syft@v0
 
+       ##########################################################################
+      # Install ORAS
+      ##########################################################################
+
+      - name: Install ORAS
+        uses: oras-project/setup-oras@v1
+
       ##########################################################################
       # Login to GHCR
       ##########################################################################
@@ -50,6 +57,14 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to GitHub Container Registry for ORAS
+        run: |
+          oras login ${{ env.REGISTRY }} --username ${{ github.actor }} --password ${{ secrets.GITHUB_TOKEN }}
+          #login to the GitHub Container Registry (GHCR) using ORAS, enabling secure access for pushing and pulling artifacts associated with the Docker image and SBOM.
+
+      #we need to login to GHCR for oras to push the SBOM as an artifact associated with the Docker image, ensuring that both the image and its corresponding SBOM are securely stored and accessible in the registry.
+      
       
       ##########################################################################
       # Build image
@@ -99,14 +114,18 @@ jobs:
       ##########################################################################
       # Generate SBOM
       ##########################################################################
-
-      - name: Generate SBOM
+    
+      - name: Generate SBOM - OCI Artifact
         run: |
-          syft \
-            registry:$REGISTRY/${{ steps.lowercase.outputs.image }}:${{ github.sha }} \
-            -o cyclonedx-json=sbom.json
-
-            #generate sbom in cyclonedx format using syft for the pushed image and save it to a file named sbom.json for later signing and attestation.
+         syft \
+         registry:$REGISTRY/${{ steps.lowercase.outputs.image }}:${{ github.sha }} \
+         -o cyclonedx-json=sbom.json
+        #generate sbom in cyclonedx format using syft for the pushed image and save it to a file named sbom.json for later signing and attestation.
+         
+      - name: Push SBOM to OCI registry
+        run: |
+          oras push $REGISTRY/${{ steps.lowercase.outputs.image }}-sbom:${{ github.sha }} sbom.json:application/vnd.cyclonedx+json
+          #push the generated sbom to the oci registry as an artifact associated with the pushed image, allowing for secure storage and retrieval of the sbom alongside the image.
 
       ##########################################################################
       # Upload artifacts
