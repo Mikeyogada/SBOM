@@ -118,9 +118,20 @@ jobs:
         run: |
           oras push \
           --artifact-type application/vnd.cyclonedx+json \
-          $REGISTRY/${{ steps.lowercase.outputs.image }}-sbom:${{ github.sha }} sbom.json:application/vnd.cyclonedx+json
+          $REGISTRY/${{ steps.lowercase.outputs.image }}-sbom:${{ github.sha }} \
+           sbom.json:application/vnd.cyclonedx+json
           #push the generated sbom to the oci registry as an artifact associated with the pushed image, allowing for secure storage and retrieval of the sbom alongside the image.
 
+      - name: Push SBOM to central inventory
+        run: |
+          curl --fail --show-error --silent -X POST "$DTRACK_URL/api/v1/bom" -H "X-Api-Key: $DTRACK_API_KEY" -F "project=$PROJECT_UUID" -F "bom=@sbom.json"
+          #push the generated sbom to the central inventory using curl, allowing for secure and centralized management of sboms for the pushed image. The API key and project UUID are used for authentication and project identification, respectively.
+
+          echo "SBOM generated and pushed to central inventory successfully."
+        env:
+          DTRACK_URL: ${{ secrets.DTRACK_URL }} #dtrack_url is used to specify the URL of the central inventory where the sbom will be registered, allowing for secure and centralized management of sboms for the pushed image.
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }} #dtrack_api_key is used to specify the API key for authenticating with the central inventory, allowing for secure access and management of sboms for the pushed image.
+          PROJECT_UUID: ${{ secrets.PROJECT_UUID }} #project_uuid is used to specify the unique identifier of the project in the central inventory where the sbom will be registered, allowing for accurate tracking and management of sboms for the pushed image
       ##########################################################################
       # Upload artifacts
       ##########################################################################
